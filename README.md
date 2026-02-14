@@ -2,7 +2,39 @@
 
 Google Calendar を参照する MCP サーバーです。
 
-## Setup
+## ChatGPT で試す
+
+本 MCP サーバーはただいまデモを公開中です。URL は次の通り。
+
+`https://app-6365ec52-2150-4db3-8e62-a55cbbb83eef.ingress.apprun.sakura.ne.jp`
+
+### 1. Google Cloud 側の準備
+
+1. Google Cloud でプロジェクトを作成します。
+2. Google Calendar API を有効化します。
+3. 「API とサービス」に移動し、OAuth 2.0 クライアント（ウェブアプリケーション）を作成します。
+4. 承認済みのリダイレクト URI に `https://chatgpt.com/connector_platform_oauth_redirect` を追加します。
+5. 発行された Client ID / Client Secret を控えておきます。
+
+### 2. ChatGPT 側でアプリを登録
+
+1. ChatGPT で Developer mode を有効化します（管理者権限が必要な場合あり）。
+2. `Apps -> Create` から新規アプリ（MCPコネクタ）を作成します。
+3. Endpoint に本サーバーの URL を設定します。
+4. OAuth を選択して設定を進めます。
+5. 保存後、ドラフトでツール列挙と OAuth ログインをテストします。
+
+### 公式ドキュメント
+
+- [OpenAI: Developer mode, and MCP apps in ChatGPT [beta]](https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta)
+- [OpenAI: Building MCP servers for ChatGPT and API integrations](https://platform.openai.com/docs/mcp)
+- [Google: Create access credentials (OAuth client ID)](https://developers.google.com/workspace/guides/create-credentials)
+- [Google: Calendar API OAuth/consent setup](https://developers.google.com/calendar/api/guides/auth)
+- [Google: OAuth 2.0 for Web Server Applications](https://developers.google.com/identity/protocols/oauth2/web-server) (`redirect_uri` 一致要件)
+
+## 開発
+
+### 準備
 
 ```sh
 python3 -m venv .venv
@@ -11,7 +43,7 @@ python -m pip install -r requirements.txt
 cp .env.template .env
 ```
 
-## Run (local)
+### 起動
 
 ```sh
 dotenv run -- python app.py
@@ -19,9 +51,32 @@ dotenv run -- python app.py
 
 デフォルトでは `http://127.0.0.1:5000` で起動します。
 
-## OAuth 認証テスト（ACCESS_TOKEN 取得）
+### Docker で起動
 
-認可コード + PKCE フローで `ACCESS_TOKEN` を取得し、キャッシュJSONに保存します。スコープはMCPサーバーの `scopes_supported` を使用します。
+```sh
+docker image build -t google-calendar-mcp-server .
+docker container run --rm -p 80:80 --env-file .env google-calendar-mcp-server
+```
+
+コンテナ内では gunicorn（WSGI）で起動します。
+
+`.env` の `RESOURCE` は公開URLに合わせて設定してください。
+
+## 主なエンドポイント
+
+- `POST /` : MCP JSON-RPC endpoint
+- `GET /.well-known/oauth-authorization-server`
+- `GET /.well-known/oauth-protected-resource`
+- `GET /oauth/authorize`（`ENABLE_AUTH_ENDPOINT_PROXY=true` の場合のみ）
+
+## Tools
+
+- `google_calendar_list`
+- `google_calendar_events`
+
+## OAuth 認証テスト
+
+認可コード + PKCE フローでトークンを取得し、キャッシュJSONに保存します。スコープはMCPサーバーの `scopes_supported` を使用します。
 `.env` には保存しません。
 
 ```sh
@@ -69,26 +124,3 @@ Dynamic Client Registration のみ必要な場合は、無効のままで問題�
 ```env
 ENABLE_AUTH_ENDPOINT_PROXY=true
 ```
-
-## Main endpoints
-
-- `POST /` : MCP JSON-RPC endpoint
-- `GET /.well-known/oauth-authorization-server`
-- `GET /.well-known/oauth-protected-resource`
-- `GET /oauth/authorize`（`ENABLE_AUTH_ENDPOINT_PROXY=true` の場合のみ）
-
-## Tools
-
-- `google_calendar_list`
-- `google_calendar_events`
-
-## Docker
-
-```sh
-docker image build -t google-calendar-mcp-server .
-docker container run --rm -p 80:80 --env-file .env google-calendar-mcp-server
-```
-
-コンテナ内では gunicorn（WSGI）で起動します。
-
-`.env` の `RESOURCE` は公開URLに合わせて設定してください。
