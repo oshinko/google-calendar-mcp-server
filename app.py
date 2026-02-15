@@ -29,6 +29,7 @@ DEFAULT_APP_PORT = "5000"
 DEFAULT_APP_DEBUG = "true"
 DEFAULT_ENABLE_AUTH_ENDPOINT_PROXY = "false"
 OAUTH_AUTHORIZE_PROXY_PATH = "/oauth/authorize"
+OAUTH_PROTECTED_RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource"
 
 resource = os.getenv("RESOURCE", DEFAULT_RESOURCE)
 app_host = os.getenv("APP_HOST", DEFAULT_APP_HOST)
@@ -40,6 +41,7 @@ oauth_client_secret = os.getenv("OAUTH_CLIENT_SECRET", "").strip()
 oauth_server_issuer = resource.rstrip("/")
 oauth_authorization_endpoint = oauth_server_issuer + OAUTH_AUTHORIZE_PROXY_PATH
 oauth_registration_endpoint = oauth_server_issuer + "/oauth-clients"
+oauth_protected_resource_metadata_endpoint = oauth_server_issuer + OAUTH_PROTECTED_RESOURCE_METADATA_PATH
 tool_definitions = [
     {
         "name": TOOL_NAME_CALENDAR_LIST,
@@ -141,7 +143,7 @@ def oauth_authorization_server_metadata():
     )
 
 
-@app.get("/.well-known/oauth-protected-resource")
+@app.get(OAUTH_PROTECTED_RESOURCE_METADATA_PATH)
 def oauth_protected_resource_metadata():
     """OAuth Protected Resource Metadata を返す。"""
     authorization_server = oauth_server_issuer if enable_auth_endpoint_proxy else GOOGLE_ISSUER
@@ -230,7 +232,7 @@ def _handle_tools_call(request_id, params):
 
     access_token = _extract_access_token(arguments)
     if not access_token:
-        return _mcp_tool_error(request_id, "Missing access token", status=400)
+        return _mcp_auth_required(request_id, "Missing access token")
 
     if tool_name == TOOL_NAME_CALENDAR_LIST:
         return _handle_tool_calendar_list(request_id, access_token)
@@ -244,6 +246,8 @@ def _handle_tools_call(request_id, params):
 def _handle_tool_calendar_list(request_id, access_token):
     calendars_resp = _fetch_calendar_list(access_token)
     if calendars_resp.get("error"):
+        if _is_google_unauthorized(calendars_resp):
+            return _mcp_auth_required(request_id, "Invalid or expired access token")
         return _mcp_tool_error(request_id, "Google API error: {}".format(calendars_resp["error"]), status=502)
 
     result = {
@@ -262,6 +266,8 @@ def _handle_tool_events(request_id, access_token, arguments):
     calendar_id = _resolve_calendar_id(arguments)
     events_resp = _fetch_events(access_token, calendar_id, time_range["time_min"], time_range["time_max"])
     if events_resp.get("error"):
+        if _is_google_unauthorized(events_resp):
+            return _mcp_auth_required(request_id, "Invalid or expired access token")
         return _mcp_tool_error(request_id, "Google API error: {}".format(events_resp["error"]), status=502)
 
     result = {
@@ -290,6 +296,31 @@ def _extract_access_token(arguments):
 
 def _mcp_result_response(request_id, result):
     return jsonify(_jsonrpc_result(request_id, result))
+
+
+def _is_google_unauthorized(response_obj):
+    error = response_obj.get("error") if isinstance(response_obj, dict) else None
+    if not isinstance(error, dict):
+        return False
+    return error.get("status_code") == 401
+
+
+def _mcp_auth_required(request_id, message):
+    result = {
+        "isError": True,
+        "content": [{"type": "text", "text": message}],
+    }
+    response = _mcp_result_response(request_id, result)
+    response.status_code = 401
+    response.headers["WWW-Authenticate"] = _build_www_authenticate_header()
+    return response
+
+
+def _build_www_authenticate_header():
+    scope_value = " ".join(SUPPORTED_SCOPES)
+    return "Bearer resource_metadata=\"{}\", scope=\"{}\"".format(
+        oauth_protected_resource_metadata_endpoint, scope_value
+    )
 
 
 def _mcp_tool_error(request_id, message, status=400):
