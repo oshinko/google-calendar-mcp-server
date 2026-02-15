@@ -1,0 +1,185 @@
+﻿name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apprun-shared-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: Production
+    env:
+      APPRUN_API_BASE: https://secure.sakura.ad.jp/cloud/api/apprun/1.0/apprun/api
+      APPRUN_APPLICATION_ID: ${{ vars.APPRUN_APPLICATION_ID }}
+      SAKURA_ACCESS_TOKEN: ${{ secrets.SAKURA_ACCESS_TOKEN }}
+      SAKURA_ACCESS_TOKEN_SECRET: ${{ secrets.SAKURA_ACCESS_TOKEN_SECRET }}
+      REGISTRY_SERVER: ${{ vars.REGISTRY_SERVER }}
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      IMAGE_REPOSITORY: ${{ vars.IMAGE_REPOSITORY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required settings
+        run: |
+          set -euo pipefail
+          required=(
+            APPRUN_APPLICATION_ID
+            SAKURA_ACCESS_TOKEN
+            SAKURA_ACCESS_TOKEN_SECRET
+            REGISTRY_SERVER
+            REGISTRY_USERNAME
+            REGISTRY_PASSWORD
+          )
+          for key in "${required[@]}"; do
+            if [ -z "${!key:-}" ]; then
+              echo "Missing required value: $key" >&2
+              exit 1
+            fi
+          done
+
+      - name: Set version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          JST_VERSION=$(TZ=Asia/Tokyo date +'%Y.%-m.%-d')
+          SHORT_SHA="${GITHUB_SHA::7}"
+
+          VERSION="${JST_VERSION}+gh${GITHUB_RUN_NUMBER}.g${SHORT_SHA}"
+          IMAGE_TAG="${VERSION/+/-}"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+          echo "VERSION is $VERSION"
+          echo "IMAGE_TAG is $IMAGE_TAG"
+
+      - name: Prepare image URI
+        id: prep
+        run: |
+          set -euo pipefail
+          repo="${IMAGE_REPOSITORY:-${GITHUB_REPOSITORY#*/}}"
+          repo="$(echo "$repo" | tr '[:upper:]' '[:lower:]')"
+          image_uri="${REGISTRY_SERVER}/${repo}:${{ steps.version.outputs.image_tag }}"
+          echo "image_uri=${image_uri}" >> "$GITHUB_OUTPUT"
+          echo "image_uri=${image_uri}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Sakura Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.REGISTRY_SERVER }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.prep.outputs.image_uri }}
+
+      - name: Update AppRun application image
+        env:
+          IMAGE_URI: ${{ steps.prep.outputs.image_uri }}
+          IMAGE_TAG: ${{ steps.version.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          app_status="$(curl -s -u "${SAKURA_ACCESS_TOKEN}:${SAKURA_ACCESS_TOKEN_SECRET}" \
+            -o app.json \
+            -w '%{http_code}' \
+            "${APPRUN_API_BASE}/applications/${APPRUN_APPLICATION_ID}")"
+          if [ "$app_status" -lt 200 ] || [ "$app_status" -ge 300 ]; then
+            echo "Failed to fetch application. HTTP $app_status" >&2
+            exit 1
+          fi
+
+          jq \
+            --arg image "$IMAGE_URI" \
+            --arg registry_server "$REGISTRY_SERVER" \
+            --arg name "$IMAGE_TAG" \
+            --arg registry_username "$REGISTRY_USERNAME" \
+            --arg registry_password "$REGISTRY_PASSWORD" \
+            '{
+            components: (.components | map(. + {
+              name: $name,
+              deploy_source: {
+                container_registry: {
+                  image: $image,
+                  server: $registry_server,
+                  username: $registry_username,
+                  password: $registry_password
+                }
+              }
+            })),
+            all_traffic_available: true
+          }' app.json > patch.json
+
+          patch_status="$(curl -s -u "${SAKURA_ACCESS_TOKEN}:${SAKURA_ACCESS_TOKEN_SECRET}" \
+            -o deploy_response.json \
+            -w '%{http_code}' \
+            -X PATCH \
+            -H 'Content-Type: application/json' \
+            --data @patch.json \
+            "${APPRUN_API_BASE}/applications/${APPRUN_APPLICATION_ID}")"
+          if [ "$patch_status" -lt 200 ] || [ "$patch_status" -ge 300 ]; then
+            echo "Failed to update application. HTTP $patch_status" >&2
+            exit 1
+          fi
+
+          echo "Deploy response:"
+          jq -r '.status // empty' deploy_response.json || true
+
+      - name: Wait for healthy status
+        run: |
+          set -euo pipefail
+          max_attempts=30
+          sleep_seconds=10
+
+          for attempt in $(seq 1 "$max_attempts"); do
+            status_code="$(curl -s -u "${SAKURA_ACCESS_TOKEN}:${SAKURA_ACCESS_TOKEN_SECRET}" \
+              -o status_response.json \
+              -w '%{http_code}' \
+              "${APPRUN_API_BASE}/applications/${APPRUN_APPLICATION_ID}/status")"
+            if [ "$status_code" -lt 200 ] || [ "$status_code" -ge 300 ]; then
+              echo "Failed to fetch application status. HTTP $status_code" >&2
+              exit 1
+            fi
+
+            app_status="$(jq -r '.status // empty' status_response.json)"
+            deploy_status="$(jq -r '.deployment.status // "null"' status_response.json)"
+            echo "Status check ${attempt}/${max_attempts}: app=${app_status}, deployment=${deploy_status}"
+
+            if [ "$app_status" = "Healthy" ]; then
+              echo "Application is healthy."
+              exit 0
+            fi
+
+            if [ "$app_status" = "UnHealthy" ]; then
+              echo "Application became UnHealthy after deploy." >&2
+              exit 1
+            fi
+
+            sleep "$sleep_seconds"
+          done
+
+          echo "Timed out waiting for Healthy status." >&2
+          exit 1
