@@ -1,13 +1,14 @@
 ﻿import logging
 import os
 from datetime import datetime, timedelta
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
-from flask import Flask, jsonify, redirect, request
+from flask import Flask, Response, jsonify, redirect, request
 
 SUPPORTED_SCOPES = [
-    "https://www.googleapis.com/auth/calendar.readonly"
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "offline_access"
 ]
 DEFAULT_CALENDAR_ID = "primary"
 
@@ -28,7 +29,9 @@ DEFAULT_APP_HOST = "127.0.0.1"
 DEFAULT_APP_PORT = "5000"
 DEFAULT_APP_DEBUG = "true"
 DEFAULT_ENABLE_AUTH_ENDPOINT_PROXY = "false"
+DEFAULT_ENABLE_TOKEN_ENDPOINT_PROXY = "false"
 OAUTH_AUTHORIZE_PROXY_PATH = "/oauth/authorize"
+OAUTH_TOKEN_PROXY_PATH = "/oauth/token"
 OAUTH_PROTECTED_RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource"
 
 resource = os.getenv("RESOURCE", DEFAULT_RESOURCE)
@@ -36,11 +39,13 @@ app_host = os.getenv("APP_HOST", DEFAULT_APP_HOST)
 app_port = int(os.getenv("APP_PORT", DEFAULT_APP_PORT))
 app_debug = os.getenv("APP_DEBUG", DEFAULT_APP_DEBUG).lower() == "true"
 enable_auth_endpoint_proxy = os.getenv("ENABLE_AUTH_ENDPOINT_PROXY", DEFAULT_ENABLE_AUTH_ENDPOINT_PROXY).lower() == "true"
-oauth_client_id = os.getenv("OAUTH_CLIENT_ID", "").strip()
-oauth_client_secret = os.getenv("OAUTH_CLIENT_SECRET", "").strip()
+enable_token_endpoint_proxy = os.getenv(
+    "ENABLE_TOKEN_ENDPOINT_PROXY", DEFAULT_ENABLE_TOKEN_ENDPOINT_PROXY
+).lower() == "true"
+use_proxy_issuer = enable_auth_endpoint_proxy or enable_token_endpoint_proxy
 oauth_server_issuer = resource.rstrip("/")
 oauth_authorization_endpoint = oauth_server_issuer + OAUTH_AUTHORIZE_PROXY_PATH
-oauth_registration_endpoint = oauth_server_issuer + "/oauth-clients"
+oauth_token_endpoint = oauth_server_issuer + OAUTH_TOKEN_PROXY_PATH
 oauth_protected_resource_metadata_endpoint = oauth_server_issuer + OAUTH_PROTECTED_RESOURCE_METADATA_PATH
 tool_definitions = [
     {
@@ -95,18 +100,6 @@ if not logging.getLogger().handlers:
 else:
     logger.setLevel(logging.DEBUG if app_debug else logging.INFO)
 
-
-def _validate_oauth_proxy_config():
-    """起動時に OAuth プロキシ設定の整合性を検証する。"""
-    if enable_auth_endpoint_proxy and not oauth_client_id:
-        raise ValueError("ENABLE_AUTH_ENDPOINT_PROXY=true requires OAUTH_CLIENT_ID")
-
-    if not enable_auth_endpoint_proxy and oauth_client_id:
-        raise ValueError("OAUTH_CLIENT_ID is set but ENABLE_AUTH_ENDPOINT_PROXY=false")
-
-
-_validate_oauth_proxy_config()
-
 app = Flask(__name__)
 
 
@@ -125,15 +118,15 @@ def health():
 @app.get("/.well-known/oauth-authorization-server")
 def oauth_authorization_server_metadata():
     """OAuth Authorization Server Metadata を返す。"""
-    issuer = oauth_server_issuer if enable_auth_endpoint_proxy else GOOGLE_ISSUER
+    issuer = oauth_server_issuer if use_proxy_issuer else GOOGLE_ISSUER
     authorization_endpoint = oauth_authorization_endpoint if enable_auth_endpoint_proxy else GOOGLE_AUTH_ENDPOINT
+    token_endpoint = oauth_token_endpoint if enable_token_endpoint_proxy else GOOGLE_TOKEN_ENDPOINT
 
     return jsonify(
         {
             "issuer": issuer,
             "authorization_endpoint": authorization_endpoint,
-            "token_endpoint": GOOGLE_TOKEN_ENDPOINT,
-            "registration_endpoint": oauth_registration_endpoint,
+            "token_endpoint": token_endpoint,
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "token_endpoint_auth_methods_supported": ["none", "client_secret_post", "client_secret_basic"],
@@ -146,7 +139,7 @@ def oauth_authorization_server_metadata():
 @app.get(OAUTH_PROTECTED_RESOURCE_METADATA_PATH)
 def oauth_protected_resource_metadata():
     """OAuth Protected Resource Metadata を返す。"""
-    authorization_server = oauth_server_issuer if enable_auth_endpoint_proxy else GOOGLE_ISSUER
+    authorization_server = oauth_server_issuer if use_proxy_issuer else GOOGLE_ISSUER
 
     return jsonify(
         {
@@ -164,26 +157,122 @@ def oauth_authorize_proxy():
     if not enable_auth_endpoint_proxy:
         return jsonify({"error": "disabled", "message": "ENABLE_AUTH_ENDPOINT_PROXY is false"}), 404
 
-    query = request.query_string.decode("utf-8")
-    redirect_url = GOOGLE_AUTH_ENDPOINT if not query else "{}?{}".format(GOOGLE_AUTH_ENDPOINT, query)
+    params = request.args.to_dict(flat=False)
+
+    # refresh_token が返らないときは prompt=consent を付けるとよく効く
+    params["prompt"] = ["consent"]
+
+    # offline_access を access_type=offline に置き換え
+    raw_scopes = [y for x in params.get("scope", []) for y in x.split()]
+
+    if "offline_access" in raw_scopes:
+        # offline_access を除去
+        scopes = [s for s in raw_scopes if s != "offline_access"]
+
+        if scopes:
+            params["scope"] = [" ".join(scopes)]
+        else:
+            params.pop("scope", None)  # scope が空になるなら消す
+
+        params["access_type"] = ["offline"]  # access_type=offline を追加
+        query_string = urlencode(params, doseq=True)
+    else:
+        query_string = request.query_string.decode("utf-8")
+
+    if query_string:
+        redirect_url = f"{GOOGLE_AUTH_ENDPOINT}?{query_string}"
+    else:
+        redirect_url = GOOGLE_AUTH_ENDPOINT
+
     logger.debug("oauth authorize proxy redirect=%s", redirect_url)
     return redirect(redirect_url, code=302)
 
 
-@app.post("/oauth-clients")
-def oauth_clients():
-    """サーバー設定に基づく Dynamic Client Registration 応答を返す。"""
-    if not oauth_client_id:
-        return jsonify({"error": "server_misconfigured", "message": "OAUTH_CLIENT_ID is not set"}), 500
+@app.post(OAUTH_TOKEN_PROXY_PATH)
+def oauth_token_proxy():
+    """トークンリクエストを Google のトークンエンドポイントへ中継する。"""
+    if not enable_token_endpoint_proxy:
+        return jsonify({"error": "disabled", "message": "ENABLE_TOKEN_ENDPOINT_PROXY is false"}), 404
 
-    response = {
-        "client_id": oauth_client_id,
-        "token_endpoint_auth_method": "client_secret_post" if oauth_client_secret else "none",
-    }
-    if oauth_client_secret:
-        response["client_secret"] = oauth_client_secret
+    outbound_headers = {}
+    content_type = request.headers.get("Content-Type")
+    if content_type:
+        outbound_headers["Content-Type"] = content_type
+    accept = request.headers.get("Accept")
+    if accept:
+        outbound_headers["Accept"] = accept
 
-    return jsonify(response), 201
+    form = request.form or {}
+
+    logger.info(
+        (
+            "oauth token proxy request_summary "
+            "content_type=%s "
+            "grant_type=%s "
+            "redirect_uri=%s "
+            "scope=%s "
+            "has_client_id=%s "
+            "has_client_secret=%s "
+            "has_code=%s "
+            "has_code_verifier=%s "
+            "has_refresh_token=%s"
+        ),
+        content_type,
+        form.get("grant_type"),
+        form.get("redirect_uri"),
+        form.get("scope"),
+        bool(form.get("client_id")),
+        bool(form.get("client_secret")),
+        bool(form.get("code")),
+        bool(form.get("code_verifier")),
+        bool(form.get("refresh_token")),
+    )
+
+    upstream_response = httpx.post(
+        GOOGLE_TOKEN_ENDPOINT,
+        data=form,
+        headers=outbound_headers,
+        timeout=30,
+    )
+
+    try:
+        token_response = upstream_response.json()
+    except ValueError:
+        token_response = {}
+
+    token_type = token_response.get("token_type")
+    expires_in = token_response.get("expires_in")
+    scope = token_response.get("scope")
+    has_refresh_token = bool(token_response.get("refresh_token"))
+    oauth_error = token_response.get("error")
+    oauth_error_description = token_response.get("error_description")
+    logger.info(
+        (
+            "oauth token proxy response_summary "
+            "upstream_status=%s "
+            "token_type=%s "
+            "expires_in=%s "
+            "scope=%s "
+            "has_refresh_token=%s "
+            "oauth_error=%s "
+            "oauth_error_description=%s"
+        ),
+        upstream_response.status_code,
+        token_type,
+        expires_in,
+        scope,
+        has_refresh_token,
+        oauth_error,
+        oauth_error_description,
+    )
+
+    response = Response(upstream_response.content, status=upstream_response.status_code)
+    for header_name in ("Content-Type", "Cache-Control", "Pragma", "WWW-Authenticate"):
+        header_value = upstream_response.headers.get(header_name)
+        if header_value:
+            response.headers[header_name] = header_value
+
+    return response
 
 
 @app.post("/")

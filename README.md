@@ -68,6 +68,7 @@ docker container run --rm -p 80:80 --env-file .env google-calendar-mcp-server
 - `GET /.well-known/oauth-authorization-server`
 - `GET /.well-known/oauth-protected-resource`
 - `GET /oauth/authorize`（`ENABLE_AUTH_ENDPOINT_PROXY=true` の場合のみ）
+- `POST /oauth/token`（`ENABLE_TOKEN_ENDPOINT_PROXY=true` の場合のみ）
 
 ## Tools
 
@@ -100,12 +101,8 @@ ChatGPT のアプリ/コネクタとして使う場合、サーバーは HTTPS �
 別ターミナルで以下を実行します。
 
 ```sh
-ngrok http 5000 --domain=<your-ngrok-domain>.ngrok-free.app
+ngrok http 5000 --url https://<your-ngrok-domain>.ngrok-free.app
 ```
-
-公開URL:
-
-- `https://<your-ngrok-domain>.ngrok-free.app`
 
 ### .env 設定例
 
@@ -117,10 +114,10 @@ RESOURCE=https://<your-ngrok-domain>.ngrok-free.app
 
 必要に応じて `APP_HOST=0.0.0.0` で待ち受けます。
 
-OAuth 認可エンドポイントのプロキシはデフォルトで無効です。
-Dynamic Client Registration のみ必要な場合は、無効のままで問題ありません。
+OAuth 認可サーバーのプロキシはデフォルトで無効です。
 必要な場合のみ `.env` で有効化してください。
 
 ```env
 ENABLE_AUTH_ENDPOINT_PROXY=true
+ENABLE_TOKEN_ENDPOINT_PROXY=true
 ```
