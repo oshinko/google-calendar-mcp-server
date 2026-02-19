@@ -27,6 +27,7 @@ Google Calendar を参照する MCP サーバーです。
 ### 公式ドキュメント
 
 - [OpenAI: Developer mode, and MCP apps in ChatGPT [beta]](https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta)
+- [OpenAI: MCP アプリで認証に OAuth を使用する場合](https://help.openai.com/ja-jp/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt-beta#h_73fb68ebd5)
 - [OpenAI: Building MCP servers for ChatGPT and API integrations](https://platform.openai.com/docs/mcp)
 - [Google: Create access credentials (OAuth client ID)](https://developers.google.com/workspace/guides/create-credentials)
 - [Google: Calendar API OAuth/consent setup](https://developers.google.com/calendar/api/guides/auth)
@@ -121,3 +122,12 @@ OAuth 認可サーバーのプロキシはデフォルトで無効です。
 ENABLE_AUTH_ENDPOINT_PROXY=true
 ENABLE_TOKEN_ENDPOINT_PROXY=true
 ```
+
+### offline_access と Google OAuth の注意点
+
+ChatGPT の MCP アプリでリフレッシュトークン運用を安定させるには、認可リクエストで `offline_access` を扱えることが重要です。  
+本サーバーは discovery metadata の `scopes_supported` に `offline_access` を含めています。
+
+一方で Google OAuth は `scope=offline_access` をそのまま受け付けないため、`ENABLE_AUTH_ENDPOINT_PROXY=true` の場合に限り、`/oauth/authorize` プロキシ内で `offline_access` を除去し `access_type=offline` を付与して Google に中継します。
+
+この変換を使わない場合、Google 側でリフレッシュトークンが返らず、アクセストークン期限切れごとに再認証が必要になることがあります。
