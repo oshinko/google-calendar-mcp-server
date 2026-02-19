@@ -51,6 +51,9 @@ tool_definitions = [
     {
         "name": TOOL_NAME_CALENDAR_LIST,
         "description": "List calendars the authenticated user can access.",
+        "annotations": {
+            "readOnlyHint": True,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -65,6 +68,9 @@ tool_definitions = [
     {
         "name": TOOL_NAME_EVENTS,
         "description": "Get Google Calendar events for a date or datetime range.",
+        "annotations": {
+            "readOnlyHint": True,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
