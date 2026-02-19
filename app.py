@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from urllib.parse import quote, urlencode
 
 import httpx
-from flask import Flask, Response, jsonify, redirect, request
+from flask import Flask, Response, jsonify, redirect, request, send_from_directory
 
 SUPPORTED_SCOPES = [
     "https://www.googleapis.com/auth/calendar.readonly",
@@ -33,6 +33,7 @@ DEFAULT_ENABLE_TOKEN_ENDPOINT_PROXY = "false"
 OAUTH_AUTHORIZE_PROXY_PATH = "/oauth/authorize"
 OAUTH_TOKEN_PROXY_PATH = "/oauth/token"
 OAUTH_PROTECTED_RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource"
+APP_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 resource = os.getenv("RESOURCE", DEFAULT_RESOURCE)
 app_host = os.getenv("APP_HOST", DEFAULT_APP_HOST)
@@ -119,6 +120,21 @@ def index():
 def health():
     """ヘルスチェック結果を返す。"""
     return jsonify({"status": "ok"})
+
+
+@app.get("/favicon.svg")
+def favicon_svg():
+    return send_from_directory(APP_BASE_DIR, "favicon.svg", mimetype="image/svg+xml")
+
+
+@app.get("/favicon.png")
+def favicon_png():
+    return send_from_directory(APP_BASE_DIR, "favicon.png", mimetype="image/png")
+
+
+@app.get("/favicon.ico")
+def favicon_ico():
+    return send_from_directory(APP_BASE_DIR, "favicon.ico", mimetype="image/x-icon")
 
 
 @app.get("/.well-known/oauth-authorization-server")

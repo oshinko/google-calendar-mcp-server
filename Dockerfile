@@ -11,7 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt && pip install --no-cache-dir gunicorn==23.0.0
 
-COPY app.py ./
+COPY app.py favicon.svg favicon.png favicon.ico ./
 
 EXPOSE 80
 
